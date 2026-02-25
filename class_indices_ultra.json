@@ -1,0 +1,6 @@
+{
+    "Diabetes": 0,
+    "Heart": 1,
+    "Hypertension": 2,
+    "Normal": 3
+}
