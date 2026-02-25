@@ -1,76 +1,63 @@
 import os
-import json
-import io
-import numpy as np
+import gdown
 import tensorflow as tf
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
 from PIL import Image
-from fastapi import FastAPI, UploadFile, File
-from tensorflow.keras.applications.efficientnet import preprocess_input
+import numpy as np
+import io
 
 app = FastAPI()
 
-# المسارات
-MODEL_PATH = "fundus_efficientnet_ultra.h5"
-INDICES_PATH = "class_indices_ultra.json"
+# روابط الموديلات من الدرايف بتاعك (الروابط اللي انتي بعتيها)
+model_right_id = '1JqS1qpP7M6_1gFCUdQlYsIdNS_JsQKau'
+model_left_id = '1dZ-eQXj0PXPjWs4OV7vHOR41Zcd2-1iP'
 
-print("🔍 Loading Ultra High-Res Model (Pure Prediction Mode)...")
-
-try:
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print("✅ Full Model Loaded Successfully!")
-except Exception as e:
-    print(f"⚠️ Reconstructing structure for compatibility... {e}")
-    base_model = tf.keras.applications.EfficientNetB3(weights=None, include_top=False, input_shape=(450, 450, 3))
-    model = tf.keras.models.Sequential([
-        base_model,
-        tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.BatchNormalization(),
-        tf.keras.layers.Dropout(0.5),
-        tf.keras.layers.Dense(512, activation='relu'),
-        tf.keras.layers.BatchNormalization(),
-        tf.keras.layers.Dropout(0.3),
-        tf.keras.layers.Dense(4, activation='softmax')
-    ])
-    model.load_weights(MODEL_PATH)
-    print("✅ Model Structure Rebuilt & Weights Loaded!")
-
-# تحميل الكلاسات
-with open(INDICES_PATH, 'r') as f:
-    class_indices = json.load(f)
-labels = {int(v): k for k, v in class_indices.items()}
-class_names = [labels[i] for i in range(len(labels))]
-
-def process_and_predict(img_bytes):
-    # 1. المعالجة
-    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-    img = img.resize((450, 450), Image.NEAREST)
+def download_and_load_models():
+    # تحميل موديل العين اليمنى
+    if not os.path.exists('model_right.h5'):
+        print("Downloading Right Eye Model...")
+        gdown.download(f'https://drive.google.com/uc?id={model_right_id}', 'model_right.h5', quiet=False)
     
-    x = np.array(img).astype('float32')
-    x = np.expand_dims(x, axis=0)
+    # تحميل موديل العين اليسرى
+    if not os.path.exists('model_left.h5'):
+        print("Downloading Left Eye Model...")
+        gdown.download(f'https://drive.google.com/uc?id={model_left_id}', 'model_left.h5', quiet=False)
     
-    # 2. Preprocessing
-    x = preprocess_input(x)
+    print("Loading models into memory...")
+    m1 = tf.keras.models.load_model('model_right.h5')
+    m2 = tf.keras.models.load_model('model_left.h5')
+    return m1, m2
 
-    # 3. التوقع
-    probabilities = model.predict(x, verbose=0)[0]
-    
-    # تحويل النسب لشكل مفهوم ومقرب
-    all_scores = {class_names[i]: round(float(probabilities[i]) * 100, 2) for i in range(len(class_names))}
-    
-    # التعديل المطلوب: هنرجع الـ detailed_probabilities فقط
-    return {
-        "detailed_probabilities": all_scores
-    }
+# تحميل الموديلات عند بدء تشغيل السيرفر
+model_right, model_left = download_and_load_models()
+
+@app.get("/")
+def home():
+    return {"status": "Online", "message": "Diabetic AI Service is ready!"}
 
 @app.post("/predict")
 async def predict(right_eye: UploadFile = File(None), left_eye: UploadFile = File(None)):
     results = {}
-    if right_eye:
-        results["RightEye"] = process_and_predict(await right_eye.read())
-    if left_eye:
-        results["LeftEye"] = process_and_predict(await left_eye.read())
-    return results
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    def process_image(file_contents, model):
+        image = Image.open(io.BytesIO(file_contents)).convert('RGB')
+        image = image.resize((224, 224))
+        img_array = np.expand_dims(np.array(image) / 255.0, axis=0)
+        prediction = model.predict(img_array)[0]
+        return {
+            "Diabetes": round(float(prediction[0]) * 100, 2),
+            "Heart": round(float(prediction[1]) * 100, 2),
+            "Hypertension": round(float(prediction[2]) * 100, 2),
+            "Normal": round(float(prediction[3]) * 100, 2)
+        }
+
+    if right_eye:
+        contents = await right_eye.read()
+        results["right_eye"] = process_image(contents, model_right)
+    
+    if left_eye:
+        contents = await left_eye.read()
+        results["left_eye"] = process_image(contents, model_left)
+
+    return results
